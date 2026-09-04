@@ -163,6 +163,7 @@
       var audioContext = null;
       var activeOscillator = null;
       var activeGain = null;
+      var needsFreshContext = false;
 
       var stateElement = document.getElementById("context-state");
       var noteElement = document.getElementById("current-note");
@@ -175,27 +176,34 @@
         messageElement.className = isError ? "error" : "";
       }
 
-      function getOrCreateAudioContext() {
+      function createAudioContext() {
         if (!AudioContextClass) {
           throw new Error("이 브라우저는 Web Audio API를 지원하지 않습니다.");
         }
 
-        if (!audioContext || audioContext.state === "closed") {
-          audioContext = new AudioContextClass();
-          audioContext.onstatechange = function () {
-            stateElement.textContent = audioContext.state;
-          };
-        }
+        audioContext = new AudioContextClass();
+        needsFreshContext = false;
+
+        var thisContext = audioContext;
+        thisContext.onstatechange = function () {
+          if (audioContext === thisContext) {
+            stateElement.textContent = thisContext.state;
+            if (thisContext.state === "interrupted") {
+              needsFreshContext = true;
+            }
+          }
+        };
 
         return audioContext;
       }
 
       function stopPreviousTone() {
-        if (!activeOscillator || !activeGain || !audioContext) {
+        if (!activeOscillator || !activeGain) {
           return;
         }
 
-        var now = audioContext.currentTime;
+        var nodeContext = activeOscillator.context || audioContext;
+        var now = nodeContext ? nodeContext.currentTime : 0;
         try {
           activeGain.gain.cancelScheduledValues(now);
           activeGain.gain.setValueAtTime(Math.max(activeGain.gain.value, 0.0001), now);
@@ -206,8 +214,41 @@
         }
       }
 
-      function playTone(frequency, label, noteName) {
-        var context = getOrCreateAudioContext();
+      function discardAudioContext() {
+        var oldContext = audioContext;
+
+        stopPreviousTone();
+        activeOscillator = null;
+        activeGain = null;
+        audioContext = null;
+
+        if (oldContext && oldContext.state !== "closed") {
+          try {
+            oldContext.close().catch(function () {
+              // iOS가 중단된 컨텍스트의 close()를 거부해도 새 컨텍스트는 사용할 수 있습니다.
+            });
+          } catch (error) {
+            // close() 미지원 또는 이미 닫힌 상태는 무시합니다.
+          }
+        }
+      }
+
+      function getContextForGesture() {
+        if (!audioContext || audioContext.state === "closed") {
+          return createAudioContext();
+        }
+
+        // iOS Safari는 화면 복귀 뒤 state가 running이어도 무음이 되는 경우가 있어
+        // 다음 사용자 터치에서 컨텍스트를 새로 만들어 오디오 세션을 복구합니다.
+        if (needsFreshContext || audioContext.state === "interrupted") {
+          discardAudioContext();
+          return createAudioContext();
+        }
+
+        return audioContext;
+      }
+
+      function playTone(context, frequency, label, noteName) {
         var now = context.currentTime;
         var oscillator;
         var gain;
@@ -246,15 +287,16 @@
         showStatus(label + " (" + noteName + ", " + frequency.toFixed(2) + " Hz)", "Sound requested", false);
       }
 
-      function activateAudioSession() {
-        var context = getOrCreateAudioContext();
+      function activateAudioSession(context) {
         var now = context.currentTime;
         var oscillator = context.createOscillator();
         var gain = context.createGain();
 
         oscillator.type = "sine";
         oscillator.frequency.setValueAtTime(440, now);
-        gain.gain.setValueAtTime(0.0001, now);
+        // 완전한 무음 대신 매우 작은 신호를 사용해 iOS 오디오 세션을 확실히 엽니다.
+        gain.gain.setValueAtTime(0.0015, now);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
         oscillator.connect(gain);
         gain.connect(context.destination);
         oscillator.onended = function () {
@@ -267,23 +309,32 @@
         showStatus("활성화 신호", "Sound requested", false);
       }
 
-      function runWithActiveContext(action, noteDescription) {
+      function runInsideUserGesture(action, noteDescription) {
         var context;
+        var resumePromise = null;
 
         try {
-          // AudioContext 생성과 resume() 호출은 반드시 이 click 핸들러의 호출 스택에서 시작합니다.
-          context = getOrCreateAudioContext();
+          // 생성, resume(), 음원 생성 및 start()를 모두 click 호출 스택 안에서 시작합니다.
+          context = getContextForGesture();
 
           if (context.state === "suspended" || context.state === "interrupted") {
-            context.resume().then(function () {
-              action();
+            resumePromise = context.resume();
+          }
+
+          // resume Promise를 기다리지 않고 사용자 제스처 안에서 음원을 즉시 예약합니다.
+          // 중단된 컨텍스트에서는 재생 시간이 멈춰 있으므로 resume 후 처음부터 출력됩니다.
+          action(context);
+
+          if (resumePromise && typeof resumePromise.then === "function") {
+            resumePromise.then(function () {
+              stateElement.textContent = context.state;
             }).catch(function (error) {
+              needsFreshContext = true;
               showStatus(noteDescription, "오디오 활성화 실패: " + error.message, true);
             });
-          } else {
-            action();
           }
         } catch (error) {
+          needsFreshContext = true;
           showStatus(noteDescription, error.message, true);
         }
       }
@@ -296,14 +347,31 @@
           var label = button.getAttribute("data-label");
           var noteName = button.getAttribute("data-note");
 
-          runWithActiveContext(function () {
-            playTone(frequency, label, noteName);
+          runInsideUserGesture(function (context) {
+            playTone(context, frequency, label, noteName);
           }, label + " (" + noteName + ")");
         });
       });
 
       document.getElementById("activate-audio").addEventListener("click", function () {
-        runWithActiveContext(activateAudioSession, "활성화 신호");
+        runInsideUserGesture(activateAudioSession, "활성화 신호");
+      });
+
+      document.addEventListener("visibilitychange", function () {
+        if (document.visibilityState === "hidden") {
+          needsFreshContext = true;
+        } else if (audioContext) {
+          stateElement.textContent = audioContext.state + " — 다시 버튼을 터치하세요";
+        }
+      });
+
+      window.addEventListener("pageshow", function (event) {
+        if (event.persisted) {
+          needsFreshContext = true;
+          if (audioContext) {
+            stateElement.textContent = audioContext.state + " — 다시 버튼을 터치하세요";
+          }
+        }
       });
     }());
   </script>
