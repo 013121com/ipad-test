@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#f4f7fb">
+  <title>iPad Web Audio 테스트</title>
+  <style>
+    :root {
+      font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+      color: #172033;
+      background: #f4f7fb;
+      -webkit-text-size-adjust: 100%;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      min-height: 100%;
+      margin: 0;
+    }
+
+    body {
+      min-height: 100vh;
+      min-height: 100svh;
+      padding: max(24px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left));
+      display: grid;
+      place-items: center;
+    }
+
+    main {
+      width: min(100%, 560px);
+      text-align: center;
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: clamp(1.65rem, 6vw, 2.25rem);
+      line-height: 1.2;
+    }
+
+    .guide {
+      margin: 0 0 28px;
+      font-size: 1.05rem;
+      line-height: 1.55;
+      color: #43506a;
+    }
+
+    .note-buttons {
+      display: grid;
+      gap: 14px;
+    }
+
+    button {
+      width: 100%;
+      min-height: 68px;
+      border: 0;
+      border-radius: 14px;
+      padding: 16px 18px;
+      font: inherit;
+      font-size: clamp(1.08rem, 4vw, 1.3rem);
+      font-weight: 750;
+      color: #ffffff;
+      background: #1463e6;
+      box-shadow: 0 5px 14px rgba(20, 99, 230, 0.2);
+      cursor: pointer;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    button:active {
+      transform: translateY(1px);
+      background: #0d52c7;
+      box-shadow: 0 2px 7px rgba(20, 99, 230, 0.22);
+    }
+
+    button:focus-visible {
+      outline: 4px solid rgba(20, 99, 230, 0.28);
+      outline-offset: 3px;
+    }
+
+    .status {
+      margin-top: 24px;
+      padding: 18px;
+      border: 1px solid #d8e0ec;
+      border-radius: 14px;
+      background: #ffffff;
+      text-align: left;
+      line-height: 1.65;
+      box-shadow: 0 5px 18px rgba(36, 49, 74, 0.06);
+    }
+
+    .status p {
+      margin: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .status strong {
+      color: #26334c;
+    }
+
+    #message {
+      font-weight: 750;
+      color: #12613b;
+    }
+
+    .activate {
+      margin-top: 28px;
+      min-height: 58px;
+      color: #172033;
+      background: #e2e9f4;
+      box-shadow: none;
+      font-size: 1rem;
+    }
+
+    .activate:active {
+      background: #d3deec;
+      box-shadow: none;
+    }
+
+    .error {
+      color: #ad1a1a !important;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      button:active {
+        transform: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Web Audio 소리 테스트</h1>
+    <p class="guide">아이패드의 음량을 올린 뒤 아래 버튼을 직접 터치하세요.</p>
+
+    <section class="note-buttons" aria-label="음 재생 버튼">
+      <button type="button" data-note="C4" data-label="도" data-frequency="261.63">🔊 소리 테스트 — 도</button>
+      <button type="button" data-note="E4" data-label="미" data-frequency="329.63">🔊 소리 테스트 — 미</button>
+      <button type="button" data-note="G4" data-label="솔" data-frequency="392.00">🔊 소리 테스트 — 솔</button>
+    </section>
+
+    <section class="status" aria-live="polite" aria-atomic="true">
+      <p><strong>AudioContext.state:</strong> <span id="context-state">생성되지 않음</span></p>
+      <p><strong>현재 재생한 음:</strong> <span id="current-note">없음</span></p>
+      <p><strong>메시지:</strong> <span id="message">대기 중</span></p>
+    </section>
+
+    <button type="button" class="activate" id="activate-audio">AudioContext 활성화</button>
+  </main>
+
+  <script>
+    (function () {
+      "use strict";
+
+      var AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      var audioContext = null;
+      var activeOscillator = null;
+      var activeGain = null;
+
+      var stateElement = document.getElementById("context-state");
+      var noteElement = document.getElementById("current-note");
+      var messageElement = document.getElementById("message");
+
+      function showStatus(note, message, isError) {
+        stateElement.textContent = audioContext ? audioContext.state : "생성되지 않음";
+        noteElement.textContent = note;
+        messageElement.textContent = message;
+        messageElement.className = isError ? "error" : "";
+      }
+
+      function getOrCreateAudioContext() {
+        if (!AudioContextClass) {
+          throw new Error("이 브라우저는 Web Audio API를 지원하지 않습니다.");
+        }
+
+        if (!audioContext || audioContext.state === "closed") {
+          audioContext = new AudioContextClass();
+          audioContext.onstatechange = function () {
+            stateElement.textContent = audioContext.state;
+          };
+        }
+
+        return audioContext;
+      }
+
+      function stopPreviousTone() {
+        if (!activeOscillator || !activeGain || !audioContext) {
+          return;
+        }
+
+        var now = audioContext.currentTime;
+        try {
+          activeGain.gain.cancelScheduledValues(now);
+          activeGain.gain.setValueAtTime(Math.max(activeGain.gain.value, 0.0001), now);
+          activeGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.025);
+          activeOscillator.stop(now + 0.03);
+        } catch (error) {
+          // 이미 종료된 노드는 무시합니다.
+        }
+      }
+
+      function playTone(frequency, label, noteName) {
+        var context = getOrCreateAudioContext();
+        var now = context.currentTime;
+        var oscillator;
+        var gain;
+
+        stopPreviousTone();
+
+        oscillator = context.createOscillator();
+        gain = context.createGain();
+
+        oscillator.type = "sine";
+        oscillator.frequency.setValueAtTime(frequency, now);
+
+        // 짧은 페이드 인/아웃으로 클릭 잡음을 막고, 단일 사인파에 안전한 음량을 사용합니다.
+        gain.gain.setValueAtTime(0.0001, now);
+        gain.gain.exponentialRampToValueAtTime(0.36, now + 0.025);
+        gain.gain.setValueAtTime(0.36, now + 0.82);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 1.0);
+
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+
+        activeOscillator = oscillator;
+        activeGain = gain;
+
+        oscillator.onended = function () {
+          oscillator.disconnect();
+          gain.disconnect();
+          if (activeOscillator === oscillator) {
+            activeOscillator = null;
+            activeGain = null;
+          }
+        };
+
+        oscillator.start(now);
+        oscillator.stop(now + 1.02);
+        showStatus(label + " (" + noteName + ", " + frequency.toFixed(2) + " Hz)", "Sound requested", false);
+      }
+
+      function activateAudioSession() {
+        var context = getOrCreateAudioContext();
+        var now = context.currentTime;
+        var oscillator = context.createOscillator();
+        var gain = context.createGain();
+
+        oscillator.type = "sine";
+        oscillator.frequency.setValueAtTime(440, now);
+        gain.gain.setValueAtTime(0.0001, now);
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+        oscillator.onended = function () {
+          oscillator.disconnect();
+          gain.disconnect();
+        };
+        oscillator.start(now);
+        oscillator.stop(now + 0.08);
+
+        showStatus("활성화 신호", "Sound requested", false);
+      }
+
+      function runWithActiveContext(action, noteDescription) {
+        var context;
+
+        try {
+          // AudioContext 생성과 resume() 호출은 반드시 이 click 핸들러의 호출 스택에서 시작합니다.
+          context = getOrCreateAudioContext();
+
+          if (context.state === "suspended" || context.state === "interrupted") {
+            context.resume().then(function () {
+              action();
+            }).catch(function (error) {
+              showStatus(noteDescription, "오디오 활성화 실패: " + error.message, true);
+            });
+          } else {
+            action();
+          }
+        } catch (error) {
+          showStatus(noteDescription, error.message, true);
+        }
+      }
+
+      var noteButtons = document.querySelectorAll("[data-frequency]");
+      Array.prototype.forEach.call(noteButtons, function (button) {
+        // touchstart를 별도로 등록하지 않습니다. iOS의 터치는 click을 한 번 발생시키므로 이중 재생을 방지합니다.
+        button.addEventListener("click", function () {
+          var frequency = Number(button.getAttribute("data-frequency"));
+          var label = button.getAttribute("data-label");
+          var noteName = button.getAttribute("data-note");
+
+          runWithActiveContext(function () {
+            playTone(frequency, label, noteName);
+          }, label + " (" + noteName + ")");
+        });
+      });
+
+      document.getElementById("activate-audio").addEventListener("click", function () {
+        runWithActiveContext(activateAudioSession, "활성화 신호");
+      });
+    }());
+  </script>
+</body>
+</html>
